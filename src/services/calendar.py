@@ -11,7 +11,7 @@ from uuid import UUID
 
 from src.config import settings
 from src.database import get_db_cursor
-from src.models.schemas import CalendarPublishResult, ShiftStatus
+from src.models.schemas import ShiftStatus
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,6 @@ def get_published_shifts(
     Raises:
         Exception: If database query fails.
     """
-    # Convert dates to datetime for comparison
     start_datetime = datetime(
         start_date.year, start_date.month, start_date.day,
         0, 0, 0, tzinfo=timezone.utc
@@ -98,16 +97,18 @@ def update_shift_status(
 
 def create_calendar_event(
     shift: dict[str, Any],
-    composio_client: Optional[Any] = None,
+    toolset: Optional[Any] = None,
+    connected_account_id: Optional[str] = None,
 ) -> bool:
     """Create a Google Calendar event for a shift using Composio.
 
-    This function uses the Composio API to create calendar events
+    This function uses the Composio SDK to create calendar events
     and send invitations to employees.
 
     Args:
         shift: Shift data including start_time, end_time, and employee email.
-        composio_client: Optional Composio client instance for dependency injection.
+        toolset: Optional ComposioToolSet instance for dependency injection.
+        connected_account_id: Optional Composio connected account ID.
 
     Returns:
         True if event was created successfully, False otherwise.
@@ -115,13 +116,30 @@ def create_calendar_event(
     Raises:
         Exception: If calendar API call fails.
     """
-    if not settings.composio_api_key:
-        logger.warning("Composio API key not configured, skipping calendar event")
-        return False
-
     try:
-        # Format shift details for calendar
-        event_title = f"Shift: {shift['full_name']}"
+        from composio import ComposioToolSet
+
+        # Initialize toolset if not provided
+        if toolset is None or connected_account_id is None:
+            # Get connected account for Google Calendar
+            toolset = ComposioToolSet()
+            connections = toolset.client.connected_accounts.get()
+            gcal_connection = next(
+                (c for c in connections if c.appName == "googlecalendar" and c.status == "ACTIVE"),
+                None
+            )
+            if gcal_connection:
+                connected_account_id = gcal_connection.id
+                logger.info("Using Google Calendar connection: %s", connected_account_id)
+                # Workaround for SDK bug: bypass check_connected_account validation
+                # The SDK's entity.get_connections() returns empty even when connections exist
+                toolset.check_connected_account = lambda *args, **kwargs: None
+            else:
+                logger.error("No active Google Calendar connection found")
+                return False
+
+        # Format event details
+        event_title = f"ShiftGuard Shift: {shift['full_name']}"
         event_description = (
             "Please Accept/Decline within 24 hours.\n\n"
             f"Employee: {shift['full_name']}\n"
@@ -130,58 +148,75 @@ def create_calendar_event(
             "Managed by ShiftGuard"
         )
 
-        # If no client provided, attempt to create one
-        if composio_client is None:
-            try:
-                from composio import ComposioToolSet
+        # Calculate duration
+        start_time = shift["start_time"]
+        end_time = shift["end_time"]
 
-                composio_client = ComposioToolSet(api_key=settings.composio_api_key)
-            except ImportError:
-                logger.error("composio-core not installed")
-                return False
+        # Handle timezone-aware datetimes
+        if start_time.tzinfo is not None:
+            start_time = start_time.replace(tzinfo=None)
+        if end_time.tzinfo is not None:
+            end_time = end_time.replace(tzinfo=None)
 
-        # Call Composio's Google Calendar integration
-        # Note: Actual Composio API calls would be structured based on their SDK
-        # This is a placeholder for the integration point
-        result = composio_client.execute_action(
-            action="GOOGLECALENDAR_CREATE_EVENT",
-            params={
-                "calendar_id": settings.google_calendar_id or "primary",
-                "summary": event_title,
-                "description": event_description,
-                "start": {
-                    "dateTime": shift["start_time"].isoformat(),
-                    "timeZone": settings.default_timezone,
-                },
-                "end": {
-                    "dateTime": shift["end_time"].isoformat(),
-                    "timeZone": settings.default_timezone,
-                },
-                "attendees": [{"email": shift["email"]}],
-                "sendUpdates": "all",
-            },
+        duration = end_time - start_time
+        duration_hours = int(duration.total_seconds() // 3600)
+        duration_minutes = int((duration.total_seconds() % 3600) // 60)
+
+        # Format start_datetime as naive datetime string (YYYY-MM-DDTHH:MM:SS)
+        start_datetime_str = start_time.strftime("%Y-%m-%dT%H:%M:%S")
+
+        logger.info(
+            "Creating calendar event: %s for %s at %s (duration: %dh %dm)",
+            event_title,
+            shift["email"],
+            start_datetime_str,
+            duration_hours,
+            duration_minutes,
         )
 
-        if result.get("success"):
+        # Execute the Composio action
+        result = toolset.execute_action(
+            action="GOOGLECALENDAR_CREATE_EVENT",
+            params={
+                "calendar_id": "primary",
+                "summary": event_title,
+                "description": event_description,
+                "start_datetime": start_datetime_str,
+                "timezone": settings.default_timezone,
+                "event_duration_hour": duration_hours,
+                "event_duration_minutes": min(duration_minutes, 59),
+                "attendees": [shift["email"]],
+                "send_updates": True,
+            },
+            connected_account_id=connected_account_id,
+        )
+
+        # Check result
+        if result.get("successful", False):
             logger.info(
-                "Created calendar event for %s on %s",
+                "Successfully created calendar event for %s on %s",
                 shift["full_name"],
-                shift["start_time"].date(),
+                shift["start_time"].date() if hasattr(shift["start_time"], 'date') else shift["start_time"],
             )
             return True
         else:
+            error_msg = result.get("error", "Unknown error")
             logger.error(
-                "Failed to create calendar event: %s",
-                result.get("error", "Unknown error"),
+                "Failed to create calendar event for %s: %s",
+                shift["full_name"],
+                error_msg,
             )
             return False
 
+    except ImportError:
+        logger.error("composio-core not installed")
+        return False
     except Exception as e:
         logger.error("Calendar event creation failed: %s", e)
         return False
 
 
-def publish_to_calendar(
+def publish_shifts(
     start_date: date,
     end_date: date,
 ) -> dict[str, int]:
@@ -196,61 +231,108 @@ def publish_to_calendar(
 
     Returns:
         Dictionary with counts of successful and failed invitations:
-        {"sent": int, "failed": int}
+        {"sent": int, "errors": int}
 
     Raises:
         ValueError: If date range is invalid.
 
     Example:
         >>> from datetime import date
-        >>> result = publish_to_calendar(
+        >>> result = publish_shifts(
         ...     start_date=date(2024, 1, 15),
         ...     end_date=date(2024, 1, 21),
         ... )
-        >>> print(f"Sent {result['sent']} invites, {result['failed']} failed")
+        >>> print(f"Sent {result['sent']} invites, {result['errors']} failed")
     """
     if start_date > end_date:
         raise ValueError("start_date must be before or equal to end_date")
 
-    # Step 1: Query published shifts
+    # Step A: Initialize Composio toolset with connection
+    try:
+        from composio import ComposioToolSet
+        toolset = ComposioToolSet()
+
+        # Get connected account for Google Calendar
+        connections = toolset.client.connected_accounts.get()
+        gcal_connection = next(
+            (c for c in connections if c.appName == "googlecalendar" and c.status == "ACTIVE"),
+            None
+        )
+        if not gcal_connection:
+            logger.error("No active Google Calendar connection found")
+            return {"sent": 0, "errors": 1}
+
+        connected_account_id = gcal_connection.id
+        logger.info("Using Google Calendar connection: %s", connected_account_id)
+
+        # Workaround for SDK bug: bypass check_connected_account validation
+        toolset.check_connected_account = lambda *a, **kw: None
+
+        logger.info("Composio toolset initialized")
+    except Exception as e:
+        logger.error("Failed to initialize Composio: %s", e)
+        return {"sent": 0, "errors": 1}
+
+    # Step B: Query published shifts
     published_shifts = get_published_shifts(start_date, end_date)
 
     if not published_shifts:
         logger.info("No published shifts found for %s to %s", start_date, end_date)
-        return {"sent": 0, "failed": 0}
+        return {"sent": 0, "errors": 0}
 
     logger.info(
         "Found %d published shifts to send to calendar",
         len(published_shifts),
     )
 
-    # Step 2: Create calendar events and track results
-    result = CalendarPublishResult(sent=0, failed=0)
+    # Track results
+    sent_count = 0
+    error_count = 0
 
+    # Step C & D: Create calendar events for each shift
     for shift in published_shifts:
         shift_id = UUID(str(shift["id"]))
 
-        # Step 3: Create calendar event via Composio
-        if create_calendar_event(shift):
+        # Create calendar event via Composio
+        if create_calendar_event(shift, toolset, connected_account_id):
             # Update status to AWAITING_RESPONSE
             if update_shift_status(shift_id, ShiftStatus.AWAITING_RESPONSE):
-                result.sent += 1
+                sent_count += 1
+                logger.info(
+                    "Shift %s status updated to AWAITING_RESPONSE",
+                    shift_id,
+                )
             else:
                 logger.warning(
                     "Created calendar event but failed to update status for shift %s",
                     shift_id,
                 )
-                result.sent += 1  # Event was created successfully
+                sent_count += 1  # Event was still created
         else:
-            result.failed += 1
-            result.errors.append(
-                f"Failed to create event for {shift['full_name']} on {shift['start_time']}"
-            )
+            error_count += 1
 
     logger.info(
-        "Calendar publish complete: %d sent, %d failed",
-        result.sent,
-        result.failed,
+        "Calendar publish complete: %d sent, %d errors",
+        sent_count,
+        error_count,
     )
 
-    return {"sent": result.sent, "failed": result.failed}
+    return {"sent": sent_count, "errors": error_count}
+
+
+# Keep old function name for backwards compatibility
+def publish_to_calendar(
+    start_date: date,
+    end_date: date,
+) -> dict[str, int]:
+    """Alias for publish_shifts for backwards compatibility.
+
+    Args:
+        start_date: Start of the date range (inclusive).
+        end_date: End of the date range (inclusive).
+
+    Returns:
+        Dictionary with counts: {"sent": int, "failed": int}
+    """
+    result = publish_shifts(start_date, end_date)
+    return {"sent": result["sent"], "failed": result["errors"]}
