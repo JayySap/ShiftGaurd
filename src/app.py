@@ -9,7 +9,7 @@ from typing import Optional
 
 from flask import Flask
 
-from src.api.routes import api
+from src.api.routes import api, cron_api
 from src.config import settings
 from src.database import close_db, init_db
 
@@ -55,6 +55,7 @@ def create_app(test_config: Optional[dict] = None) -> Flask:
 
     # Register blueprints
     app.register_blueprint(api)
+    app.register_blueprint(cron_api)
 
     # Initialize database on first request
     @app.before_request

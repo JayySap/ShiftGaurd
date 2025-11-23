@@ -5,7 +5,8 @@ schedule generation, and calendar publishing.
 """
 
 import logging
-from datetime import date, datetime
+import os
+from datetime import date, datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
@@ -349,4 +350,77 @@ def publish_schedule():
         return jsonify({
             "status": "error",
             "message": f"Calendar publish failed: {str(e)}",
+        }), 500
+
+
+# Create a separate blueprint for cron endpoints (no /api/v1 prefix)
+cron_api = Blueprint("cron_api", __name__)
+
+
+@cron_api.route("/api/cron/generate_schedule", methods=["GET"])
+def cron_generate_schedule():
+    """Secure cron endpoint for automatic schedule generation.
+
+    Called by Vercel Cron every Friday at 5 PM Pacific Time.
+    Generates the draft schedule for the upcoming week (Monday-Sunday).
+
+    Security:
+        Requires Authorization header with Bearer token matching CRON_SECRET.
+
+    Returns:
+        JSON response with generated shifts summary.
+    """
+    # Security check
+    cron_secret = os.getenv("CRON_SECRET")
+    if cron_secret:
+        auth_header = request.headers.get("Authorization")
+        if auth_header != f"Bearer {cron_secret}":
+            logger.warning("Unauthorized cron request attempt")
+            return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        # Calculate date range for next week (Monday-Sunday)
+        today = date.today()
+        days_until_monday = (7 - today.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7  # Next Monday if today is Monday
+
+        start_date = today + timedelta(days=days_until_monday)
+        end_date = start_date + timedelta(days=6)  # Sunday
+
+        logger.info(
+            "Cron job triggered: Generating schedule for %s to %s",
+            start_date,
+            end_date,
+        )
+
+        # Generate the schedule
+        shifts = generate_draft_schedule(start_date, end_date)
+
+        # Count results
+        total_shifts = len(shifts)
+        violations = sum(1 for s in shifts if s.is_clopen_violation)
+
+        logger.info(
+            "Schedule generated: %d shifts, %d violations",
+            total_shifts,
+            violations,
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Schedule generated successfully",
+            "date_range": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+            },
+            "shifts_created": total_shifts,
+            "violations_flagged": violations,
+        }), 200
+
+    except Exception as e:
+        logger.error("Cron job failed: %s", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e),
         }), 500

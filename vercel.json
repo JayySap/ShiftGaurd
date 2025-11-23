@@ -2,27 +2,19 @@
   "version": 2,
   "builds": [
     {
-      "src": "src/app.py",
-      "use": "@vercel/python"
-    },
-    {
-      "src": "api/cron/generate_schedule.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
-      "src": "/api/cron/generate-schedule",
-      "dest": "api/cron/generate_schedule.py"
-    },
-    {
       "src": "/(.*)",
-      "dest": "src/app.py"
+      "dest": "api/index.py"
     }
   ],
   "crons": [
     {
-      "path": "/api/cron/generate-schedule",
+      "path": "/api/cron/generate_schedule",
       "schedule": "0 1 * * 6"
     }
   ]
