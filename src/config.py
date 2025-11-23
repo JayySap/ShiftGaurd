@@ -108,3 +108,17 @@ class Settings(BaseSettings):
 
 # Singleton instance for application-wide configuration
 settings = Settings()
+
+# Shift hour definitions for the 3-shift system
+SHIFT_HOURS = {
+    "OPEN": {"start": 6, "end": 14},   # 06:00 - 14:00
+    "MID": {"start": 10, "end": 18},   # 10:00 - 18:00
+    "CLOSE": {"start": 14, "end": 22}, # 14:00 - 22:00
+}
+
+# Daily staffing requirements
+DAILY_REQUIREMENTS = {
+    "OPEN": 1,
+    "MID": 1,
+    "CLOSE": 1,
+}

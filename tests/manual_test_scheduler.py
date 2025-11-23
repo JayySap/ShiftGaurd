@@ -20,7 +20,8 @@ from dotenv import load_dotenv
 # Load environment variables before importing app modules
 load_dotenv()
 
-from src.database import init_db, close_db
+from src.config import SHIFT_HOURS
+from src.database import init_db, close_db, get_db_cursor
 from src.services.scheduler import generate_draft_schedule
 
 
@@ -43,9 +44,34 @@ def get_shift_type(start_hour: int) -> str:
         start_hour: Hour of shift start (0-23).
 
     Returns:
-        'OPENING' or 'CLOSING' string.
+        'OPEN', 'MID', or 'CLOSE' string.
     """
-    return "OPENING" if start_hour < 12 else "CLOSING"
+    if start_hour == SHIFT_HOURS["OPEN"]["start"]:
+        return "OPEN"
+    elif start_hour == SHIFT_HOURS["MID"]["start"]:
+        return "MID"
+    elif start_hour == SHIFT_HOURS["CLOSE"]["start"]:
+        return "CLOSE"
+    else:
+        return "UNKNOWN"
+
+
+def get_employee_name(employee_id: str) -> str:
+    """Look up employee name by ID.
+
+    Args:
+        employee_id: UUID of the employee.
+
+    Returns:
+        Employee's full name or 'Unknown'.
+    """
+    with get_db_cursor(commit=False) as cur:
+        cur.execute(
+            "SELECT full_name FROM employees WHERE id = %s",
+            (str(employee_id),)
+        )
+        result = cur.fetchone()
+        return result["full_name"] if result else "Unknown"
 
 
 def main() -> int:
@@ -55,8 +81,13 @@ def main() -> int:
         Exit code (0 for success, 1 for failure).
     """
     print("=" * 60)
-    print("ShiftGuard - Scheduler Logic Verification")
+    print("ShiftGuard - 3-Shift Scheduler Verification")
     print("=" * 60)
+    print()
+    print("Shift Configuration:")
+    print(f"  OPEN:  {SHIFT_HOURS['OPEN']['start']:02d}:00 - {SHIFT_HOURS['OPEN']['end']:02d}:00")
+    print(f"  MID:   {SHIFT_HOURS['MID']['start']:02d}:00 - {SHIFT_HOURS['MID']['end']:02d}:00")
+    print(f"  CLOSE: {SHIFT_HOURS['CLOSE']['start']:02d}:00 - {SHIFT_HOURS['CLOSE']['end']:02d}:00")
     print()
 
     # Calculate tomorrow's date
@@ -91,48 +122,32 @@ def main() -> int:
             return 1
 
         # Group shifts by type
-        opening_shifts = []
-        closing_shifts = []
+        shifts_by_type = {"OPEN": [], "MID": [], "CLOSE": []}
 
         for shift in shifts:
             shift_type = get_shift_type(shift.start_time.hour)
-            if shift_type == "OPENING":
-                opening_shifts.append(shift)
+            if shift_type in shifts_by_type:
+                shifts_by_type[shift_type].append(shift)
+
+        # Print shifts by type
+        for shift_type in ["OPEN", "MID", "CLOSE"]:
+            type_shifts = shifts_by_type[shift_type]
+            print()
+            print(f"{shift_type} SHIFTS ({len(type_shifts)} assigned)")
+            print("-" * 40)
+            if type_shifts:
+                for shift in type_shifts:
+                    employee_name = get_employee_name(shift.employee_id)
+                    violation_flag = " ⚠️ VIOLATION" if shift.is_clopen_violation else ""
+                    print(f"  • {employee_name}")
+                    print(f"    Time: {format_shift_time(shift.start_time)} - {format_shift_time(shift.end_time)}")
+                    print(f"    Status: {shift.status.value}{violation_flag}")
+                    if shift.violation_reason:
+                        print(f"    Reason: {shift.violation_reason}")
+                    print()
             else:
-                closing_shifts.append(shift)
-
-        # Print opening shifts
-        print()
-        print(f"OPENING SHIFTS ({len(opening_shifts)} assigned)")
-        print("-" * 40)
-        if opening_shifts:
-            for shift in opening_shifts:
-                violation_flag = " ⚠️ VIOLATION" if shift.is_clopen_violation else ""
-                print(f"  • Employee ID: {shift.employee_id}")
-                print(f"    Time: {format_shift_time(shift.start_time)} - {format_shift_time(shift.end_time)}")
-                print(f"    Status: {shift.status.value}{violation_flag}")
-                if shift.violation_reason:
-                    print(f"    Reason: {shift.violation_reason}")
+                print("  (No shifts assigned)")
                 print()
-        else:
-            print("  (No opening shifts assigned)")
-            print()
-
-        # Print closing shifts
-        print(f"CLOSING SHIFTS ({len(closing_shifts)} assigned)")
-        print("-" * 40)
-        if closing_shifts:
-            for shift in closing_shifts:
-                violation_flag = " ⚠️ VIOLATION" if shift.is_clopen_violation else ""
-                print(f"  • Employee ID: {shift.employee_id}")
-                print(f"    Time: {format_shift_time(shift.start_time)} - {format_shift_time(shift.end_time)}")
-                print(f"    Status: {shift.status.value}{violation_flag}")
-                if shift.violation_reason:
-                    print(f"    Reason: {shift.violation_reason}")
-                print()
-        else:
-            print("  (No closing shifts assigned)")
-            print()
 
         # Summary
         print("=" * 60)
@@ -142,8 +157,43 @@ def main() -> int:
         violations = sum(1 for s in shifts if s.is_clopen_violation)
         print(f"  Total shifts created: {total_shifts}")
         print(f"  Compliance violations flagged: {violations}")
-        print(f"  Opening shifts: {len(opening_shifts)}")
-        print(f"  Closing shifts: {len(closing_shifts)}")
+        print(f"  OPEN shifts: {len(shifts_by_type['OPEN'])}")
+        print(f"  MID shifts: {len(shifts_by_type['MID'])}")
+        print(f"  CLOSE shifts: {len(shifts_by_type['CLOSE'])}")
+        print()
+
+        # Verification check
+        print("=" * 60)
+        print("VERIFICATION")
+        print("=" * 60)
+
+        # Check if Alex got MID shift
+        alex_got_mid = False
+        for shift in shifts_by_type["MID"]:
+            name = get_employee_name(shift.employee_id)
+            if "Alex" in name:
+                alex_got_mid = True
+                print(f"  ✓ Alex Mid assigned to MID shift (as expected)")
+                break
+
+        if not alex_got_mid and shifts_by_type["MID"]:
+            mid_names = [get_employee_name(s.employee_id) for s in shifts_by_type["MID"]]
+            print(f"  ⚠ MID shift assigned to: {', '.join(mid_names)}")
+
+        # Check Mike got OPEN
+        for shift in shifts_by_type["OPEN"]:
+            name = get_employee_name(shift.employee_id)
+            if "Mike" in name:
+                print(f"  ✓ Mike Opener assigned to OPEN shift (as expected)")
+                break
+
+        # Check John got CLOSE
+        for shift in shifts_by_type["CLOSE"]:
+            name = get_employee_name(shift.employee_id)
+            if "John" in name:
+                print(f"  ✓ John Closer assigned to CLOSE shift (as expected)")
+                break
+
         print()
 
         if violations > 0:
