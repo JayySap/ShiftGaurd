@@ -32,21 +32,22 @@ def health_check():
 
 @api.route("/availability/webhook", methods=["POST"])
 def availability_webhook():
-    """Webhook endpoint for Google Forms availability submissions.
+    """Webhook endpoint for Google Forms/Apps Script availability submissions.
 
-    Expects a JSON payload with:
-        - email: Employee's email address
-        - dates: List of dates (YYYY-MM-DD format)
-        - can_open_dates: List of dates available for opening
-        - can_close_dates: List of dates available for closing
-        - notes: Optional dict mapping dates to notes
+    Accepts two payload formats:
 
-    Returns:
-        JSON response indicating success or failure.
+    Format 1 - Google Apps Script (from Google Forms):
+        {
+            "email": "john@example.com",
+            "answers": {
+                "date": "2024-01-15",
+                "can_open": "Yes",
+                "can_close": "No",
+                "notes": "Must leave by 4pm"
+            }
+        }
 
-    Example request:
-        POST /api/v1/availability/webhook
-        Content-Type: application/json
+    Format 2 - Direct/Batch submission:
         {
             "email": "john@example.com",
             "dates": ["2024-01-15", "2024-01-16"],
@@ -54,6 +55,9 @@ def availability_webhook():
             "can_close_dates": ["2024-01-16"],
             "notes": {"2024-01-15": "Must leave by 4pm"}
         }
+
+    Returns:
+        JSON response indicating success or failure.
     """
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 400
@@ -62,6 +66,17 @@ def availability_webhook():
 
     if not payload:
         return jsonify({"error": "Empty payload"}), 400
+
+    logger.info("Received webhook payload: %s", payload)
+
+    # Detect and transform Google Apps Script format
+    if "answers" in payload:
+        payload = transform_google_apps_script_payload(payload)
+        if payload is None:
+            return jsonify({
+                "status": "error",
+                "message": "Invalid Google Apps Script payload format",
+            }), 400
 
     # Convert date strings to date objects
     try:
@@ -84,6 +99,7 @@ def availability_webhook():
                 for d in payload["can_close_dates"]
             ]
     except ValueError as e:
+        logger.error("Date parsing error: %s", e)
         return jsonify({"error": f"Invalid date format: {e}"}), 400
 
     success = ingest_availability(payload)
@@ -97,6 +113,96 @@ def availability_webhook():
             "status": "error",
             "message": "Failed to process availability. Employee may not exist.",
         }), 400
+
+
+def transform_google_apps_script_payload(payload: dict) -> dict | None:
+    """Transform Google Apps Script payload to internal format.
+
+    Google Apps Script sends:
+        {
+            "email": "user@example.com",
+            "answers": {
+                "date": "2024-01-15",
+                "can_open": "Yes",  # or "No"
+                "can_close": "Yes", # or "No"
+                "notes": "Optional notes"
+            }
+        }
+
+    We transform to:
+        {
+            "email": "user@example.com",
+            "dates": ["2024-01-15"],
+            "can_open_dates": ["2024-01-15"],  # if can_open == "Yes"
+            "can_close_dates": [],              # if can_close == "No"
+            "notes": {"2024-01-15": "Optional notes"}
+        }
+
+    Args:
+        payload: The Google Apps Script payload.
+
+    Returns:
+        Transformed payload dict, or None if invalid.
+    """
+    try:
+        email = payload.get("email")
+        answers = payload.get("answers", {})
+
+        if not email:
+            logger.error("Missing email in Google Apps Script payload")
+            return None
+
+        # Extract date - support multiple formats
+        date_str = answers.get("date") or answers.get("Date")
+        if not date_str:
+            logger.error("Missing date in Google Apps Script payload")
+            return None
+
+        # Parse various date formats
+        date_obj = None
+        for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"]:
+            try:
+                date_obj = datetime.strptime(date_str, fmt).date()
+                break
+            except ValueError:
+                continue
+
+        if date_obj is None:
+            logger.error("Could not parse date: %s", date_str)
+            return None
+
+        date_iso = date_obj.isoformat()
+
+        # Parse can_open/can_close (handle Yes/No/TRUE/FALSE/1/0)
+        can_open_raw = str(answers.get("can_open", answers.get("Can Open", "No")))
+        can_close_raw = str(answers.get("can_close", answers.get("Can Close", "No")))
+
+        def parse_bool(val: str) -> bool:
+            return val.lower() in ("yes", "true", "1", "y")
+
+        can_open = parse_bool(can_open_raw)
+        can_close = parse_bool(can_close_raw)
+
+        # Build transformed payload
+        transformed = {
+            "email": email,
+            "dates": [date_iso],
+            "can_open_dates": [date_iso] if can_open else [],
+            "can_close_dates": [date_iso] if can_close else [],
+            "notes": {},
+        }
+
+        # Add notes if present
+        notes = answers.get("notes") or answers.get("Notes") or answers.get("note")
+        if notes:
+            transformed["notes"] = {date_iso: notes}
+
+        logger.info("Transformed Google Apps Script payload: %s", transformed)
+        return transformed
+
+    except Exception as e:
+        logger.error("Failed to transform Google Apps Script payload: %s", e)
+        return None
 
 
 @api.route("/schedule/generate", methods=["POST"])
