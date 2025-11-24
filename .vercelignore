@@ -1,0 +1,23 @@
+# Exclude Poetry files - Vercel should use requirements.txt
+pyproject.toml
+poetry.lock
+
+# Exclude development files
+.env
+.env.local
+*.pyc
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Exclude test files
+tests/
+
+# Exclude docs
+docs/
+*.md

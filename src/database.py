@@ -122,8 +122,8 @@ db_pool = DatabasePool()
 def get_db_connection() -> Generator[Any, None, None]:
     """Context manager for database connections.
 
-    Automatically handles connection acquisition and release,
-    ensuring connections are returned to the pool.
+    For serverless environments (Vercel), creates fresh connections
+    each time to avoid stale connection issues with suspended databases.
 
     Yields:
         A psycopg2 connection object.
@@ -136,13 +136,31 @@ def get_db_connection() -> Generator[Any, None, None]:
         ...     with conn.cursor() as cur:
         ...         cur.execute("SELECT 1")
     """
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        yield conn
-    finally:
-        if conn is not None:
-            db_pool.return_connection(conn)
+    import os
+
+    # In serverless, create fresh connections to avoid stale pool connections
+    is_serverless = os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+
+    if is_serverless:
+        conn = None
+        try:
+            conn = psycopg2.connect(settings.database_url)
+            yield conn
+        except psycopg2.Error as e:
+            logger.error("Database connection failed: %s", e)
+            raise DatabaseError(f"Connection failed: {e}") from e
+        finally:
+            if conn is not None:
+                conn.close()
+    else:
+        # Use connection pool for non-serverless environments
+        conn = None
+        try:
+            conn = db_pool.get_connection()
+            yield conn
+        finally:
+            if conn is not None:
+                db_pool.return_connection(conn)
 
 
 @contextmanager
@@ -189,10 +207,19 @@ def init_db() -> None:
     """Initialize the database connection pool.
 
     Should be called once at application startup.
+    Skipped in serverless environments where fresh connections are used.
 
     Raises:
         DatabaseError: If initialization fails.
     """
+    import os
+
+    # Skip pool initialization in serverless - we use fresh connections
+    is_serverless = os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    if is_serverless:
+        logger.info("Serverless environment detected, skipping connection pool")
+        return
+
     db_pool.initialize()
 
 
