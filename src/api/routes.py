@@ -141,12 +141,8 @@ def get_shifts():
             }), 200
 
     except Exception as e:
-        import traceback
         logger.error("Failed to fetch shifts: %s", e)
-        return jsonify({
-            "error": f"Failed to fetch shifts: {str(e)}",
-            "traceback": traceback.format_exc()
-        }), 500
+        return jsonify({"error": f"Failed to fetch shifts: {str(e)}"}), 500
 
 
 @api.route("/employees", methods=["GET"])
