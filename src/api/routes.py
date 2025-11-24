@@ -30,6 +30,206 @@ def health_check():
     return jsonify({"status": "healthy", "service": "ShiftGuard"}), 200
 
 
+@api.route("/shifts", methods=["GET"])
+def get_shifts():
+    """Get shifts with optional filtering.
+
+    Query Parameters:
+        start_date: Start date filter (YYYY-MM-DD format, required)
+        end_date: End date filter (YYYY-MM-DD format, required)
+        status: Optional status filter (DRAFT, AWAITING_RESPONSE, CONFIRMED, DECLINED, PUBLISHED)
+
+    Returns:
+        JSON list of shifts with employee information.
+
+    Example request:
+        GET /api/v1/shifts?start_date=2025-11-24&end_date=2025-11-30
+        GET /api/v1/shifts?start_date=2025-11-24&end_date=2025-11-30&status=DRAFT
+    """
+    from src.database import get_db_cursor
+
+    # Parse required date params
+    start_date_str = request.args.get("start_date")
+    end_date_str = request.args.get("end_date")
+    status_filter = request.args.get("status")
+
+    if not start_date_str or not end_date_str:
+        return jsonify({
+            "error": "Missing required query parameters: start_date, end_date"
+        }), 400
+
+    try:
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+    except ValueError as e:
+        return jsonify({"error": f"Invalid date format: {e}"}), 400
+
+    if start_date > end_date:
+        return jsonify({"error": "start_date must be before end_date"}), 400
+
+    # Build query
+    try:
+        with get_db_cursor(commit=False) as cur:
+            if status_filter:
+                cur.execute(
+                    """
+                    SELECT
+                        s.id,
+                        s.employee_id,
+                        e.full_name as employee_name,
+                        e.email as employee_email,
+                        s.start_time,
+                        s.end_time,
+                        s.status,
+                        s.is_clopen_violation,
+                        s.violation_reason,
+                        s.created_at
+                    FROM shifts s
+                    JOIN employees e ON s.employee_id = e.id
+                    WHERE DATE(s.start_time) BETWEEN %s AND %s
+                      AND s.status = %s
+                    ORDER BY s.start_time, e.full_name
+                    """,
+                    (start_date, end_date, status_filter),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT
+                        s.id,
+                        s.employee_id,
+                        e.full_name as employee_name,
+                        e.email as employee_email,
+                        s.start_time,
+                        s.end_time,
+                        s.status,
+                        s.is_clopen_violation,
+                        s.violation_reason,
+                        s.created_at
+                    FROM shifts s
+                    JOIN employees e ON s.employee_id = e.id
+                    WHERE DATE(s.start_time) BETWEEN %s AND %s
+                    ORDER BY s.start_time, e.full_name
+                    """,
+                    (start_date, end_date),
+                )
+
+            rows = cur.fetchall()
+
+            shifts = []
+            for row in rows:
+                shifts.append({
+                    "id": str(row["id"]),
+                    "employee_id": str(row["employee_id"]),
+                    "employee_name": row["employee_name"],
+                    "employee_email": row["employee_email"],
+                    "start_time": row["start_time"].isoformat() if row["start_time"] else None,
+                    "end_time": row["end_time"].isoformat() if row["end_time"] else None,
+                    "status": row["status"],
+                    "is_violation": row["is_clopen_violation"],
+                    "violation_reason": row["violation_reason"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                })
+
+            return jsonify({
+                "shifts": shifts,
+                "count": len(shifts),
+                "date_range": {
+                    "start": start_date.isoformat(),
+                    "end": end_date.isoformat(),
+                },
+            }), 200
+
+    except Exception as e:
+        logger.error("Failed to fetch shifts: %s", e)
+        return jsonify({"error": f"Failed to fetch shifts: {str(e)}"}), 500
+
+
+@api.route("/employees", methods=["GET"])
+def get_employees():
+    """Get all employees with their standard availability.
+
+    Returns:
+        JSON list of employees with their weekly availability patterns.
+
+    Example response:
+        {
+            "employees": [
+                {
+                    "id": "...",
+                    "full_name": "John Doe",
+                    "email": "john@example.com",
+                    "availability": {
+                        "Monday": {"can_open": true, "can_close": false},
+                        "Tuesday": {"can_open": true, "can_close": true},
+                        ...
+                    }
+                }
+            ]
+        }
+    """
+    from src.database import get_db_cursor
+
+    DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+    try:
+        with get_db_cursor(commit=False) as cur:
+            # Get all active employees
+            cur.execute(
+                """
+                SELECT id, full_name, email, max_weekly_hours, is_active
+                FROM employees
+                WHERE is_active = TRUE
+                ORDER BY full_name
+                """
+            )
+            employee_rows = cur.fetchall()
+
+            # Get all standard availability
+            cur.execute(
+                """
+                SELECT employee_id, day_of_week, can_open, can_close
+                FROM standard_availability
+                ORDER BY employee_id, day_of_week
+                """
+            )
+            availability_rows = cur.fetchall()
+
+            # Build availability lookup
+            availability_map: dict = {}
+            for row in availability_rows:
+                emp_id = str(row["employee_id"])
+                if emp_id not in availability_map:
+                    availability_map[emp_id] = {}
+                day_name = DAY_NAMES[row["day_of_week"]]
+                availability_map[emp_id][day_name] = {
+                    "can_open": row["can_open"],
+                    "can_close": row["can_close"],
+                }
+
+            # Build response
+            employees = []
+            for row in employee_rows:
+                emp_id = str(row["id"])
+                employees.append({
+                    "id": emp_id,
+                    "full_name": row["full_name"],
+                    "email": row["email"],
+                    "max_weekly_hours": row["max_weekly_hours"],
+                    "is_active": row["is_active"],
+                    "availability": availability_map.get(emp_id, {}),
+                })
+
+            return jsonify({
+                "employees": employees,
+                "count": len(employees),
+            }), 200
+
+    except Exception as e:
+        logger.error("Failed to fetch employees: %s", e)
+        return jsonify({"error": f"Failed to fetch employees: {str(e)}"}), 500
+
+
 @api.route("/availability/webhook", methods=["POST"])
 def availability_webhook():
     """Webhook endpoint for Google Forms/Apps Script availability submissions.
