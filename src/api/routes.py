@@ -70,7 +70,25 @@ def availability_webhook():
 
     logger.info("Received webhook payload: %s", payload)
 
-    # Detect and transform Google Apps Script format
+    # Check if this is recurring availability (has day names in answers)
+    # If so, pass directly to ingest_availability which handles it
+    answers = payload.get("answers", {})
+    day_names = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+    has_day_keys = any(key.lower() in day_names for key in answers.keys())
+
+    if has_day_keys:
+        # Recurring availability - pass directly to ingest_availability
+        logger.info("Detected recurring availability payload")
+        success = ingest_availability(payload)
+        if success:
+            return jsonify({"status": "success", "message": "Availability recorded"}), 200
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to process availability. Employee may not exist.",
+            }), 400
+
+    # Detect and transform Google Apps Script format (date-based)
     if "answers" in payload:
         payload = transform_google_apps_script_payload(payload)
         if payload is None:
