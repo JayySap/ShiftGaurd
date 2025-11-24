@@ -23,17 +23,18 @@ def get_real_app():
 @app.route("/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 def proxy_all(path):
     """Proxy all requests to the lazily-loaded real app."""
-    real_app = get_real_app()
+    import traceback
+    try:
+        real_app = get_real_app()
 
-    with real_app.test_request_context(
-        path=f"/{path}" if path else "/",
-        method=request.method,
-        headers=dict(request.headers),
-        data=request.get_data(),
-        content_type=request.content_type,
-        query_string=request.query_string,
-    ):
-        try:
+        with real_app.test_request_context(
+            path=f"/{path}" if path else "/",
+            method=request.method,
+            headers=dict(request.headers),
+            data=request.get_data(),
+            content_type=request.content_type,
+            query_string=request.query_string,
+        ):
             # Dispatch to the real app
             rv = real_app.full_dispatch_request()
             response = real_app.make_response(rv)
@@ -43,6 +44,5 @@ def proxy_all(path):
                 headers=dict(response.headers),
                 content_type=response.content_type
             )
-        except Exception as e:
-            import traceback
-            return {"error": str(e), "traceback": traceback.format_exc()}, 500
+    except Exception as e:
+        return {"error": str(e), "traceback": traceback.format_exc()}, 500
