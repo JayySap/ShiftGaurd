@@ -6,7 +6,9 @@
       "Bash(vercel --prod:*)",
       "WebFetch(domain:vercel.com)",
       "Bash(python3:*)",
-      "Bash(vercel env rm:*)"
+      "Bash(vercel env rm:*)",
+      "Bash(vercel env:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

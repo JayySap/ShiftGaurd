@@ -12,7 +12,6 @@ from flask import Blueprint, jsonify, request
 
 from src.models.schemas import ShiftStatus
 from src.services.availability import ingest_availability
-from src.services.calendar import publish_to_calendar
 from src.services.scheduler import generate_draft_schedule
 
 logger = logging.getLogger(__name__)
@@ -345,14 +344,22 @@ def publish_schedule():
 
     # Publish to calendar
     try:
-        result = publish_to_calendar(batch_size)
+        from src.services.calendar import publish_shifts
+        result = publish_shifts(batch_size)
 
-        return jsonify({
+        response = {
             "status": "success",
-            "published": result["sent"],
+            "published": result["published"],
             "failed": result["failed"],
             "remaining": result["remaining"],
-        }), 200
+        }
+
+        # Include error message if present
+        if "error" in result:
+            response["error"] = result["error"]
+            response["status"] = "error"
+
+        return jsonify(response), 200
 
     except Exception as e:
         logger.error("Calendar publish failed: %s", e)
