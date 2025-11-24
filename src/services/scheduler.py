@@ -39,15 +39,13 @@ class ComplianceViolation:
         self.severity = severity
 
 
-def get_availability_for_range(
-    start_date: date,
-    end_date: date,
+def get_standard_availability_for_day(
+    day_of_week: int,
 ) -> list[dict[str, Any]]:
-    """Fetch all availability records for a date range.
+    """Fetch standard availability records for a specific day of week.
 
     Args:
-        start_date: Start of the date range (inclusive).
-        end_date: End of the date range (inclusive).
+        day_of_week: Day of week (0=Monday, 6=Sunday).
 
     Returns:
         List of availability records with employee information.
@@ -59,25 +57,63 @@ def get_availability_for_range(
         cur.execute(
             """
             SELECT
-                a.id,
-                a.employee_id,
-                a.shift_date,
-                a.can_open,
-                a.can_close,
-                a.note,
+                sa.id,
+                sa.employee_id,
+                sa.day_of_week,
+                sa.can_open,
+                sa.can_close,
                 e.full_name,
                 e.email,
                 e.max_weekly_hours,
                 e.waived_notice_period
-            FROM availability a
-            JOIN employees e ON a.employee_id = e.id
-            WHERE a.shift_date BETWEEN %s AND %s
+            FROM standard_availability sa
+            JOIN employees e ON sa.employee_id = e.id
+            WHERE sa.day_of_week = %s
               AND e.is_active = TRUE
-            ORDER BY a.shift_date, e.full_name
+            ORDER BY e.full_name
             """,
-            (start_date, end_date),
+            (day_of_week,),
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+def get_availability_for_range(
+    start_date: date,
+    end_date: date,
+) -> list[dict[str, Any]]:
+    """Fetch all availability records for a date range.
+
+    This function now queries standard_availability based on the weekday
+    of each date in the range, allowing for recurring weekly patterns.
+
+    Args:
+        start_date: Start of the date range (inclusive).
+        end_date: End of the date range (inclusive).
+
+    Returns:
+        List of availability records with employee information and shift_date.
+
+    Raises:
+        Exception: If database query fails.
+    """
+    all_records = []
+    current_date = start_date
+
+    while current_date <= end_date:
+        # Convert Python weekday (0=Monday, 6=Sunday) to calendar convention (0=Sunday, 1=Monday, ..., 6=Saturday)
+        python_weekday = current_date.weekday()  # 0=Monday, 6=Sunday
+        calendar_weekday = (python_weekday + 1) % 7  # 0=Sunday, 1=Monday, ..., 6=Saturday
+
+        day_records = get_standard_availability_for_day(calendar_weekday)
+
+        # Add shift_date to each record for compatibility with existing code
+        for record in day_records:
+            record["shift_date"] = current_date
+            all_records.append(record)
+
+        current_date += timedelta(days=1)
+
+    return all_records
 
 
 def get_recent_shifts(
