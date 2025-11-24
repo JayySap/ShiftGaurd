@@ -104,12 +104,9 @@ def shutdown_app() -> None:
     close_db()
 
 
-# Application instance for WSGI servers (Gunicorn, Vercel, etc.)
-app = create_app()
-
-
 if __name__ == "__main__":
-    # Development server
+    # Development server - create app only when running directly
+    app = create_app()
     app.run(
         host="0.0.0.0",
         port=5000,
