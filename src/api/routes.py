@@ -308,59 +308,50 @@ def generate_schedule():
 
 @api.route("/schedule/publish", methods=["POST"])
 def publish_schedule():
-    """Publish approved shifts to Google Calendar.
+    """Publish DRAFT shifts to Google Calendar in batches.
 
-    Expects a JSON payload with:
-        - start_date: Start date (YYYY-MM-DD format)
-        - end_date: End date (YYYY-MM-DD format)
+    Processes shifts where status='DRAFT' AND is_clopen_violation=False.
+    Call repeatedly until 'remaining' is 0 to publish all shifts.
+
+    Accepts optional JSON payload:
+        - batch_size: Number of shifts to process per call (default: 5, max: 10)
 
     Returns:
-        JSON response with publish statistics.
+        JSON response with:
+        - published: Shifts published in this batch
+        - failed: Shifts that failed in this batch
+        - remaining: Shifts still waiting to be published
 
     Example request:
         POST /api/v1/schedule/publish
         Content-Type: application/json
-        {
-            "start_date": "2024-01-15",
-            "end_date": "2024-01-21"
-        }
+        {"batch_size": 5}
+
+    Example loop to publish all:
+        while True:
+            result = POST /api/v1/schedule/publish
+            if result['remaining'] == 0:
+                break
     """
-    if not request.is_json:
-        return jsonify({"error": "Content-Type must be application/json"}), 400
+    # Parse optional batch_size from JSON body
+    batch_size = 5  # Default
+    if request.is_json:
+        payload = request.get_json() or {}
+        batch_size = payload.get("batch_size", 5)
+        # Clamp batch_size to safe range
+        batch_size = max(1, min(10, int(batch_size)))
 
-    payload = request.get_json()
-
-    if not payload:
-        return jsonify({"error": "Empty payload"}), 400
-
-    # Validate required fields
-    if "start_date" not in payload or "end_date" not in payload:
-        return jsonify({
-            "error": "Missing required fields: start_date, end_date",
-        }), 400
-
-    # Parse dates
-    try:
-        start_date = datetime.strptime(payload["start_date"], "%Y-%m-%d").date()
-        end_date = datetime.strptime(payload["end_date"], "%Y-%m-%d").date()
-    except ValueError as e:
-        return jsonify({"error": f"Invalid date format: {e}"}), 400
-
-    if start_date > end_date:
-        return jsonify({"error": "start_date must be before end_date"}), 400
+    logger.info("Publish endpoint called with batch_size=%d", batch_size)
 
     # Publish to calendar
     try:
-        result = publish_to_calendar(start_date, end_date)
+        result = publish_to_calendar(batch_size)
 
         return jsonify({
             "status": "success",
-            "sent": result["sent"],
+            "published": result["sent"],
             "failed": result["failed"],
-            "date_range": {
-                "start": start_date.isoformat(),
-                "end": end_date.isoformat(),
-            },
+            "remaining": result["remaining"],
         }), 200
 
     except Exception as e:
@@ -368,6 +359,9 @@ def publish_schedule():
         return jsonify({
             "status": "error",
             "message": f"Calendar publish failed: {str(e)}",
+            "published": 0,
+            "failed": 0,
+            "remaining": 0,
         }), 500
 
 

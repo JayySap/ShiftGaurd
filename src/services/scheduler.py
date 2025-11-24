@@ -396,6 +396,10 @@ def generate_draft_schedule(
     hours_allocated: dict[UUID, float] = defaultdict(float)
     created_shifts: list[Shift] = []
 
+    # Track previous day's closing shift assignments for clopen detection
+    # Maps employee_id -> end_time of their closing shift
+    previous_day_closers: dict[UUID, datetime] = {}
+
     # Step 2: Iterate through each day in the range
     current_date = start_date
     while current_date <= end_date:
@@ -412,6 +416,9 @@ def generate_draft_schedule(
         # Track filled slots per shift type
         slots_filled: dict[str, int] = {"OPEN": 0, "MID": 0, "CLOSE": 0}
 
+        # Track today's closers for next day's clopen check
+        todays_closers: dict[UUID, datetime] = {}
+
         # Priority 1: Assign MID_ONLY staff to MID slots
         mid_shifts = _allocate_shift_type(
             candidates=categories["MID_ONLY"],
@@ -421,6 +428,8 @@ def generate_draft_schedule(
             hours_allocated=hours_allocated,
             week_start=week_start,
             assigned_today=assigned_today,
+            previous_day_closers=previous_day_closers,
+            todays_closers=todays_closers,
         )
         created_shifts.extend(mid_shifts)
         slots_filled["MID"] = len(mid_shifts)
@@ -434,6 +443,8 @@ def generate_draft_schedule(
             hours_allocated=hours_allocated,
             week_start=week_start,
             assigned_today=assigned_today,
+            previous_day_closers=previous_day_closers,
+            todays_closers=todays_closers,
         )
         created_shifts.extend(open_shifts)
         slots_filled["OPEN"] = len(open_shifts)
@@ -447,6 +458,8 @@ def generate_draft_schedule(
             hours_allocated=hours_allocated,
             week_start=week_start,
             assigned_today=assigned_today,
+            previous_day_closers=previous_day_closers,
+            todays_closers=todays_closers,
         )
         created_shifts.extend(close_shifts)
         slots_filled["CLOSE"] = len(close_shifts)
@@ -465,6 +478,8 @@ def generate_draft_schedule(
                 hours_allocated=hours_allocated,
                 week_start=week_start,
                 assigned_today=assigned_today,
+                previous_day_closers=previous_day_closers,
+                todays_closers=todays_closers,
             )
             created_shifts.extend(extra_open)
             slots_filled["OPEN"] += len(extra_open)
@@ -480,6 +495,8 @@ def generate_draft_schedule(
                 hours_allocated=hours_allocated,
                 week_start=week_start,
                 assigned_today=assigned_today,
+                previous_day_closers=previous_day_closers,
+                todays_closers=todays_closers,
             )
             created_shifts.extend(extra_mid)
             slots_filled["MID"] += len(extra_mid)
@@ -495,6 +512,8 @@ def generate_draft_schedule(
                 hours_allocated=hours_allocated,
                 week_start=week_start,
                 assigned_today=assigned_today,
+                previous_day_closers=previous_day_closers,
+                todays_closers=todays_closers,
             )
             created_shifts.extend(extra_close)
             slots_filled["CLOSE"] += len(extra_close)
@@ -507,6 +526,9 @@ def generate_draft_schedule(
             slots_filled["MID"], DAILY_REQUIREMENTS["MID"],
             slots_filled["CLOSE"], DAILY_REQUIREMENTS["CLOSE"],
         )
+
+        # Update previous_day_closers for next iteration
+        previous_day_closers = todays_closers
 
         current_date += timedelta(days=1)
 
@@ -528,6 +550,8 @@ def _allocate_shift_type(
     hours_allocated: dict[UUID, float],
     week_start: date,
     assigned_today: set[UUID],
+    previous_day_closers: dict[UUID, datetime],
+    todays_closers: dict[UUID, datetime],
 ) -> list[Shift]:
     """Allocate a specific shift type to candidates.
 
@@ -539,6 +563,8 @@ def _allocate_shift_type(
         hours_allocated: Running tally of hours per employee.
         week_start: Monday of the current week.
         assigned_today: Set of employee IDs already assigned today.
+        previous_day_closers: Dict mapping employee_id to their close shift end time from yesterday.
+        todays_closers: Dict to populate with today's close shift assignments.
 
     Returns:
         List of created Shift objects.
@@ -607,24 +633,40 @@ def _allocate_shift_type(
         is_violation = False
         violation_reason = None
 
-        # Rule A: Rest period check
-        rest_violation = check_rest_period_violation(employee_id, shift_start)
-        if rest_violation:
-            is_violation = True
-            violation_reason = rest_violation.description
-            logger.warning(
-                "Compliance risk for %s on %s %s: %s",
-                candidate["full_name"],
-                shift_date,
-                shift_type,
-                violation_reason,
-            )
+        # Rule A: Clopen check - if assigning OPEN shift, check if they closed yesterday
+        if shift_type == "OPEN" and employee_id in previous_day_closers:
+            prev_close_end = previous_day_closers[employee_id]
+            rest_hours = (shift_start - prev_close_end).total_seconds() / 3600
+            if rest_hours < settings.min_rest_hours:
+                is_violation = True
+                violation_reason = f"Clopen: {rest_hours:.1f}h rest after yesterday's close (< {settings.min_rest_hours}h)"
+                logger.warning(
+                    "CLOPEN VIOLATION for %s on %s: %s",
+                    candidate["full_name"],
+                    shift_date,
+                    violation_reason,
+                )
 
-        # Rule B: Weekly rest check
-        weekly_violation = check_weekly_rest_violation(employee_id, week_start)
-        if weekly_violation and not violation_reason:
-            is_violation = True
-            violation_reason = weekly_violation.description
+        # Rule B: Rest period check (from database - previous schedules)
+        if not is_violation:
+            rest_violation = check_rest_period_violation(employee_id, shift_start)
+            if rest_violation:
+                is_violation = True
+                violation_reason = rest_violation.description
+                logger.warning(
+                    "Compliance risk for %s on %s %s: %s",
+                    candidate["full_name"],
+                    shift_date,
+                    shift_type,
+                    violation_reason,
+                )
+
+        # Rule C: Weekly rest check
+        if not is_violation:
+            weekly_violation = check_weekly_rest_violation(employee_id, week_start)
+            if weekly_violation:
+                is_violation = True
+                violation_reason = weekly_violation.description
 
         # Create the shift
         shift_data = ShiftCreate(
@@ -645,11 +687,17 @@ def _allocate_shift_type(
             )
             assigned_today.add(employee_id)
             assigned_count += 1
+
+            # Track closers for next day's clopen check
+            if shift_type == "CLOSE":
+                todays_closers[employee_id] = shift_end
+
             logger.info(
-                "Assigned %s shift on %s to %s",
+                "Assigned %s shift on %s to %s%s",
                 shift_type,
                 shift_date,
                 candidate["full_name"],
+                " [VIOLATION]" if is_violation else "",
             )
 
     if assigned_count < required_count:

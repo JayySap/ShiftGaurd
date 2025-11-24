@@ -216,37 +216,78 @@ def create_calendar_event(
         return False
 
 
-def publish_shifts(
-    start_date: date,
-    end_date: date,
-) -> dict[str, int]:
-    """Push approved shifts to Google Calendar using Composio.
-
-    Retrieves all PUBLISHED shifts within the date range and creates
-    Google Calendar events with employee invitations.
+def get_publishable_shifts(batch_size: int = 5) -> tuple[list[dict[str, Any]], int]:
+    """Fetch DRAFT shifts without violations, limited by batch size.
 
     Args:
-        start_date: Start of the date range (inclusive).
-        end_date: End of the date range (inclusive).
+        batch_size: Maximum number of shifts to fetch (default 5 for Vercel timeout safety).
 
     Returns:
-        Dictionary with counts of successful and failed invitations:
-        {"sent": int, "errors": int}
+        Tuple of (shifts_list, total_remaining_count).
 
     Raises:
-        ValueError: If date range is invalid.
+        Exception: If database query fails.
+    """
+    with get_db_cursor(commit=False) as cur:
+        # First get total count of publishable shifts
+        cur.execute(
+            """
+            SELECT COUNT(*) as total
+            FROM shifts s
+            JOIN employees e ON s.employee_id = e.id
+            WHERE s.status = %s
+              AND s.is_clopen_violation = FALSE
+            """,
+            (ShiftStatus.DRAFT.value,),
+        )
+        total_result = cur.fetchone()
+        total_remaining = total_result["total"] if total_result else 0
+
+        # Then fetch the batch
+        cur.execute(
+            """
+            SELECT
+                s.id,
+                s.employee_id,
+                s.start_time,
+                s.end_time,
+                s.status,
+                e.email,
+                e.full_name
+            FROM shifts s
+            JOIN employees e ON s.employee_id = e.id
+            WHERE s.status = %s
+              AND s.is_clopen_violation = FALSE
+            ORDER BY s.start_time
+            LIMIT %s
+            """,
+            (ShiftStatus.DRAFT.value, batch_size),
+        )
+        shifts = [dict(row) for row in cur.fetchall()]
+
+        return shifts, total_remaining
+
+
+def publish_shifts(batch_size: int = 5) -> dict[str, Any]:
+    """Publish DRAFT shifts to Google Calendar using Composio.
+
+    Processes shifts in batches to prevent Vercel function timeouts.
+    Only publishes shifts where status='DRAFT' AND is_clopen_violation=False.
+
+    Args:
+        batch_size: Maximum number of shifts to process per call (default 5).
+
+    Returns:
+        Dictionary with:
+        - published: Number of shifts successfully published in this batch
+        - failed: Number of shifts that failed in this batch
+        - remaining: Number of shifts still waiting to be published
 
     Example:
-        >>> from datetime import date
-        >>> result = publish_shifts(
-        ...     start_date=date(2024, 1, 15),
-        ...     end_date=date(2024, 1, 21),
-        ... )
-        >>> print(f"Sent {result['sent']} invites, {result['errors']} failed")
+        >>> result = publish_shifts(batch_size=5)
+        >>> print(f"Published {result['published']}, remaining: {result['remaining']}")
+        >>> # Call repeatedly until remaining == 0
     """
-    if start_date > end_date:
-        raise ValueError("start_date must be before or equal to end_date")
-
     # Step A: Initialize Composio toolset with connection
     try:
         from composio import ComposioToolSet
@@ -260,79 +301,198 @@ def publish_shifts(
         )
         if not gcal_connection:
             logger.error("No active Google Calendar connection found")
-            return {"sent": 0, "errors": 1}
+            return {"published": 0, "failed": 0, "remaining": 0, "error": "No Google Calendar connection"}
 
         connected_account_id = gcal_connection.id
         logger.info("Using Google Calendar connection: %s", connected_account_id)
 
-        # Workaround for SDK bug: bypass check_connected_account validation
-        toolset.check_connected_account = lambda *a, **kw: None
+        # MONKEY PATCH: Workaround for Composio SDK bug
+        # The SDK's entity.get_connections() returns empty even when connections exist
+        # This bypasses the check_connected_account validation
+        toolset.check_connected_account = lambda *args, **kwargs: None
 
-        logger.info("Composio toolset initialized")
+        logger.info("Composio toolset initialized with monkey patch")
+    except ImportError:
+        logger.error("composio-core not installed")
+        return {"published": 0, "failed": 0, "remaining": 0, "error": "Composio not installed"}
     except Exception as e:
         logger.error("Failed to initialize Composio: %s", e)
-        return {"sent": 0, "errors": 1}
+        return {"published": 0, "failed": 0, "remaining": 0, "error": str(e)}
 
-    # Step B: Query published shifts
-    published_shifts = get_published_shifts(start_date, end_date)
+    # Step B: Query publishable shifts (DRAFT + no violations) with batch limit
+    shifts, total_remaining = get_publishable_shifts(batch_size)
 
-    if not published_shifts:
-        logger.info("No published shifts found for %s to %s", start_date, end_date)
-        return {"sent": 0, "errors": 0}
+    if not shifts:
+        logger.info("No publishable shifts found")
+        return {"published": 0, "failed": 0, "remaining": 0}
 
     logger.info(
-        "Found %d published shifts to send to calendar",
-        len(published_shifts),
+        "Processing batch of %d shifts (%d total remaining)",
+        len(shifts),
+        total_remaining,
     )
 
     # Track results
-    sent_count = 0
-    error_count = 0
+    published_count = 0
+    failed_count = 0
 
-    # Step C & D: Create calendar events for each shift
-    for shift in published_shifts:
+    # Step C: Create calendar events for each shift with error boundary
+    for shift in shifts:
         shift_id = UUID(str(shift["id"]))
 
-        # Create calendar event via Composio
-        if create_calendar_event(shift, toolset, connected_account_id):
-            # Update status to AWAITING_RESPONSE
-            if update_shift_status(shift_id, ShiftStatus.AWAITING_RESPONSE):
-                sent_count += 1
-                logger.info(
-                    "Shift %s status updated to AWAITING_RESPONSE",
-                    shift_id,
-                )
+        try:
+            # Execute Composio action with error boundary
+            result = _create_calendar_event_safe(shift, toolset, connected_account_id)
+
+            if result:
+                # Update status to AWAITING_RESPONSE
+                if update_shift_status(shift_id, ShiftStatus.AWAITING_RESPONSE):
+                    published_count += 1
+                    logger.info(
+                        "Published shift %s for %s on %s",
+                        shift_id,
+                        shift["full_name"],
+                        shift["start_time"],
+                    )
+                else:
+                    # Event created but status update failed - still count as published
+                    published_count += 1
+                    logger.warning(
+                        "Created event but failed to update status for shift %s",
+                        shift_id,
+                    )
             else:
-                logger.warning(
-                    "Created calendar event but failed to update status for shift %s",
+                failed_count += 1
+                logger.error(
+                    "Failed to create calendar event for shift %s (%s)",
                     shift_id,
+                    shift["full_name"],
                 )
-                sent_count += 1  # Event was still created
-        else:
-            error_count += 1
+
+        except Exception as e:
+            # Error boundary: log and continue to next shift
+            failed_count += 1
+            logger.error(
+                "Exception publishing shift %s: %s",
+                shift_id,
+                str(e),
+            )
+            continue
+
+    # Calculate remaining after this batch
+    remaining_after = total_remaining - published_count
 
     logger.info(
-        "Calendar publish complete: %d sent, %d errors",
-        sent_count,
-        error_count,
+        "Batch complete: %d published, %d failed, %d remaining",
+        published_count,
+        failed_count,
+        remaining_after,
     )
 
-    return {"sent": sent_count, "errors": error_count}
+    return {
+        "published": published_count,
+        "failed": failed_count,
+        "remaining": max(0, remaining_after),
+    }
+
+
+def _create_calendar_event_safe(
+    shift: dict[str, Any],
+    toolset: Any,
+    connected_account_id: str,
+) -> bool:
+    """Create a calendar event with error handling.
+
+    This is a wrapper around the Composio execute_action call with
+    proper error boundary to prevent one failure from crashing the batch.
+
+    Args:
+        shift: Shift data including start_time, end_time, and employee email.
+        toolset: Initialized ComposioToolSet instance.
+        connected_account_id: Composio connected account ID.
+
+    Returns:
+        True if event was created successfully, False otherwise.
+    """
+    try:
+        # Format event details
+        event_title = f"ShiftGuard Shift: {shift['full_name']}"
+        event_description = (
+            "Please Accept/Decline within 24 hours.\n\n"
+            f"Employee: {shift['full_name']}\n"
+            f"Start: {shift['start_time']}\n"
+            f"End: {shift['end_time']}\n\n"
+            "Managed by ShiftGuard"
+        )
+
+        # Calculate duration
+        start_time = shift["start_time"]
+        end_time = shift["end_time"]
+
+        # Handle timezone-aware datetimes
+        if start_time.tzinfo is not None:
+            start_time = start_time.replace(tzinfo=None)
+        if end_time.tzinfo is not None:
+            end_time = end_time.replace(tzinfo=None)
+
+        duration = end_time - start_time
+        duration_hours = int(duration.total_seconds() // 3600)
+        duration_minutes = int((duration.total_seconds() % 3600) // 60)
+
+        # Format start_datetime as naive datetime string
+        start_datetime_str = start_time.strftime("%Y-%m-%dT%H:%M:%S")
+
+        logger.info(
+            "Creating event: %s for %s at %s",
+            event_title,
+            shift["email"],
+            start_datetime_str,
+        )
+
+        # Execute the Composio action with error boundary
+        result = toolset.execute_action(
+            action="GOOGLECALENDAR_CREATE_EVENT",
+            params={
+                "calendar_id": "primary",
+                "summary": event_title,
+                "description": event_description,
+                "start_datetime": start_datetime_str,
+                "timezone": settings.default_timezone,
+                "event_duration_hour": duration_hours,
+                "event_duration_minutes": min(duration_minutes, 59),
+                "attendees": [shift["email"]],
+                "send_updates": True,
+            },
+            connected_account_id=connected_account_id,
+        )
+
+        # Check result
+        if result.get("successful", False):
+            logger.info("Successfully created calendar event for %s", shift["full_name"])
+            return True
+        else:
+            error_msg = result.get("error", "Unknown error")
+            logger.error("Composio returned error: %s", error_msg)
+            return False
+
+    except Exception as e:
+        logger.error("Exception in _create_calendar_event_safe: %s", e)
+        return False
 
 
 # Keep old function name for backwards compatibility
-def publish_to_calendar(
-    start_date: date,
-    end_date: date,
-) -> dict[str, int]:
+def publish_to_calendar(batch_size: int = 5) -> dict[str, int]:
     """Alias for publish_shifts for backwards compatibility.
 
     Args:
-        start_date: Start of the date range (inclusive).
-        end_date: End of the date range (inclusive).
+        batch_size: Maximum number of shifts to process per call.
 
     Returns:
-        Dictionary with counts: {"sent": int, "failed": int}
+        Dictionary with counts: {"sent": int, "failed": int, "remaining": int}
     """
-    result = publish_shifts(start_date, end_date)
-    return {"sent": result["sent"], "failed": result["errors"]}
+    result = publish_shifts(batch_size)
+    return {
+        "sent": result["published"],
+        "failed": result["failed"],
+        "remaining": result["remaining"],
+    }

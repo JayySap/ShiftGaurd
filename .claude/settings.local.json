@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(poetry run python:*)",
+      "Bash(curl:*)",
+      "Bash(vercel --prod:*)",
+      "WebFetch(domain:vercel.com)",
+      "Bash(python3:*)",
+      "Bash(vercel env rm:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
