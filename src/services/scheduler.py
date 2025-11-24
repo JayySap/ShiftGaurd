@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
-from src.config import settings, SHIFT_HOURS, DAILY_REQUIREMENTS
+from src.config import settings, SHIFT_HOURS, DAILY_REQUIREMENTS, SHIFT_LEAD_REQUIRED
 from src.database import get_db_cursor
 from src.models.schemas import Shift, ShiftCreate, ShiftStatus
 
@@ -64,6 +64,7 @@ def get_standard_availability_for_day(
                 sa.can_close,
                 e.full_name,
                 e.email,
+                e.role,
                 e.max_weekly_hours,
                 e.waived_notice_period
             FROM standard_availability sa
@@ -362,10 +363,10 @@ def generate_draft_schedule(
 ) -> list[Shift]:
     """Generate a draft schedule for the specified date range.
 
-    Uses a 3-shift system (OPEN, MID, CLOSE) with priority-based allocation:
-    1. Assign MID_ONLY staff to MID slots first
-    2. Assign OPEN_ONLY staff to OPEN slots
-    3. Assign CLOSE_ONLY staff to CLOSE slots
+    Uses a 4-shift system (OPEN, MID, COVER, CLOSE) with priority-based allocation:
+    1. Assign MID_ONLY staff to MID/COVER slots first
+    2. Assign OPEN_ONLY staff to OPEN slots (prioritize Shift Leads)
+    3. Assign CLOSE_ONLY staff to CLOSE slots (prioritize Shift Leads)
     4. Assign FLEXIBLE staff to remaining empty slots
 
     Args:
@@ -413,17 +414,17 @@ def generate_draft_schedule(
         # Track assigned employees for this day to avoid double-booking
         assigned_today: set[UUID] = set()
 
-        # Track filled slots per shift type
-        slots_filled: dict[str, int] = {"OPEN": 0, "MID": 0, "CLOSE": 0}
+        # Track filled slots per shift type (now includes COVER)
+        slots_filled: dict[str, int] = {"OPEN": 0, "MID": 0, "COVER": 0, "CLOSE": 0}
 
         # Track today's closers for next day's clopen check
         todays_closers: dict[UUID, datetime] = {}
 
-        # Priority 1: Assign MID_ONLY staff to MID slots
+        # Priority 1: Assign MID_ONLY staff to MID slots first
         mid_shifts = _allocate_shift_type(
             candidates=categories["MID_ONLY"],
             shift_type="MID",
-            required_count=DAILY_REQUIREMENTS["MID"],
+            required_count=DAILY_REQUIREMENTS.get("MID", 1),
             shift_date=current_date,
             hours_allocated=hours_allocated,
             week_start=week_start,
@@ -434,11 +435,26 @@ def generate_draft_schedule(
         created_shifts.extend(mid_shifts)
         slots_filled["MID"] = len(mid_shifts)
 
-        # Priority 2: Assign OPEN_ONLY staff to OPEN slots
+        # Priority 1b: Assign MID_ONLY staff to COVER slots (if MID is filled)
+        cover_shifts = _allocate_shift_type(
+            candidates=categories["MID_ONLY"],
+            shift_type="COVER",
+            required_count=DAILY_REQUIREMENTS.get("COVER", 1),
+            shift_date=current_date,
+            hours_allocated=hours_allocated,
+            week_start=week_start,
+            assigned_today=assigned_today,
+            previous_day_closers=previous_day_closers,
+            todays_closers=todays_closers,
+        )
+        created_shifts.extend(cover_shifts)
+        slots_filled["COVER"] = len(cover_shifts)
+
+        # Priority 2: Assign OPEN_ONLY staff to OPEN slots (Shift Leads first)
         open_shifts = _allocate_shift_type(
             candidates=categories["OPEN_ONLY"],
             shift_type="OPEN",
-            required_count=DAILY_REQUIREMENTS["OPEN"],
+            required_count=DAILY_REQUIREMENTS.get("OPEN", 1),
             shift_date=current_date,
             hours_allocated=hours_allocated,
             week_start=week_start,
@@ -449,11 +465,11 @@ def generate_draft_schedule(
         created_shifts.extend(open_shifts)
         slots_filled["OPEN"] = len(open_shifts)
 
-        # Priority 3: Assign CLOSE_ONLY staff to CLOSE slots
+        # Priority 3: Assign CLOSE_ONLY staff to CLOSE slots (Shift Leads first)
         close_shifts = _allocate_shift_type(
             candidates=categories["CLOSE_ONLY"],
             shift_type="CLOSE",
-            required_count=DAILY_REQUIREMENTS["CLOSE"],
+            required_count=DAILY_REQUIREMENTS.get("CLOSE", 1),
             shift_date=current_date,
             hours_allocated=hours_allocated,
             week_start=week_start,
@@ -468,8 +484,8 @@ def generate_draft_schedule(
         flexible_candidates = categories["FLEXIBLE"]
 
         # Fill remaining OPEN slots
-        if slots_filled["OPEN"] < DAILY_REQUIREMENTS["OPEN"]:
-            remaining_open = DAILY_REQUIREMENTS["OPEN"] - slots_filled["OPEN"]
+        if slots_filled["OPEN"] < DAILY_REQUIREMENTS.get("OPEN", 1):
+            remaining_open = DAILY_REQUIREMENTS.get("OPEN", 1) - slots_filled["OPEN"]
             extra_open = _allocate_shift_type(
                 candidates=flexible_candidates,
                 shift_type="OPEN",
@@ -485,8 +501,8 @@ def generate_draft_schedule(
             slots_filled["OPEN"] += len(extra_open)
 
         # Fill remaining MID slots
-        if slots_filled["MID"] < DAILY_REQUIREMENTS["MID"]:
-            remaining_mid = DAILY_REQUIREMENTS["MID"] - slots_filled["MID"]
+        if slots_filled["MID"] < DAILY_REQUIREMENTS.get("MID", 1):
+            remaining_mid = DAILY_REQUIREMENTS.get("MID", 1) - slots_filled["MID"]
             extra_mid = _allocate_shift_type(
                 candidates=flexible_candidates,
                 shift_type="MID",
@@ -501,9 +517,26 @@ def generate_draft_schedule(
             created_shifts.extend(extra_mid)
             slots_filled["MID"] += len(extra_mid)
 
+        # Fill remaining COVER slots
+        if slots_filled["COVER"] < DAILY_REQUIREMENTS.get("COVER", 1):
+            remaining_cover = DAILY_REQUIREMENTS.get("COVER", 1) - slots_filled["COVER"]
+            extra_cover = _allocate_shift_type(
+                candidates=flexible_candidates,
+                shift_type="COVER",
+                required_count=remaining_cover,
+                shift_date=current_date,
+                hours_allocated=hours_allocated,
+                week_start=week_start,
+                assigned_today=assigned_today,
+                previous_day_closers=previous_day_closers,
+                todays_closers=todays_closers,
+            )
+            created_shifts.extend(extra_cover)
+            slots_filled["COVER"] += len(extra_cover)
+
         # Fill remaining CLOSE slots
-        if slots_filled["CLOSE"] < DAILY_REQUIREMENTS["CLOSE"]:
-            remaining_close = DAILY_REQUIREMENTS["CLOSE"] - slots_filled["CLOSE"]
+        if slots_filled["CLOSE"] < DAILY_REQUIREMENTS.get("CLOSE", 1):
+            remaining_close = DAILY_REQUIREMENTS.get("CLOSE", 1) - slots_filled["CLOSE"]
             extra_close = _allocate_shift_type(
                 candidates=flexible_candidates,
                 shift_type="CLOSE",
@@ -520,11 +553,12 @@ def generate_draft_schedule(
 
         # Log daily summary
         logger.info(
-            "Day %s: OPEN=%d/%d, MID=%d/%d, CLOSE=%d/%d",
+            "Day %s: OPEN=%d/%d, MID=%d/%d, COVER=%d/%d, CLOSE=%d/%d",
             current_date,
-            slots_filled["OPEN"], DAILY_REQUIREMENTS["OPEN"],
-            slots_filled["MID"], DAILY_REQUIREMENTS["MID"],
-            slots_filled["CLOSE"], DAILY_REQUIREMENTS["CLOSE"],
+            slots_filled["OPEN"], DAILY_REQUIREMENTS.get("OPEN", 1),
+            slots_filled["MID"], DAILY_REQUIREMENTS.get("MID", 1),
+            slots_filled["COVER"], DAILY_REQUIREMENTS.get("COVER", 1),
+            slots_filled["CLOSE"], DAILY_REQUIREMENTS.get("CLOSE", 1),
         )
 
         # Update previous_day_closers for next iteration
@@ -542,6 +576,27 @@ def generate_draft_schedule(
     return created_shifts
 
 
+def _get_break_schedule(shift_duration_hours: float) -> str:
+    """Calculate BC Labor Law compliant break schedule.
+
+    BC Employment Standards:
+    - Shifts > 5 hours: 30min unpaid meal break
+    - Shifts > 7 hours: Additional paid rest breaks (2x 15min)
+
+    Args:
+        shift_duration_hours: Length of shift in hours.
+
+    Returns:
+        Human-readable break schedule string.
+    """
+    if shift_duration_hours > 7:
+        return "30m unpaid meal + 2x 15m paid"
+    elif shift_duration_hours > 5:
+        return "30m unpaid meal + 15m paid"
+    else:
+        return "15m paid"
+
+
 def _allocate_shift_type(
     candidates: list[dict[str, Any]],
     shift_type: str,
@@ -557,7 +612,7 @@ def _allocate_shift_type(
 
     Args:
         candidates: List of available employees for this shift type.
-        shift_type: One of 'OPEN', 'MID', 'CLOSE'.
+        shift_type: One of 'OPEN', 'MID', 'COVER', 'CLOSE'.
         required_count: Number of shifts to fill.
         shift_date: The date of the shift.
         hours_allocated: Running tally of hours per employee.
@@ -576,11 +631,18 @@ def _allocate_shift_type(
     shift_start_hour = shift_hours["start"]
     shift_end_hour = shift_hours["end"]
 
-    # Sort candidates by hours allocated (fairness - fewest hours first)
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: hours_allocated.get(UUID(str(c["employee_id"])), 0),
-    )
+    # Check if this shift type requires a Shift Lead
+    requires_shift_lead = shift_type in SHIFT_LEAD_REQUIRED
+
+    # Sort candidates: Shift Leads first for OPEN/CLOSE, then by hours allocated (fairness)
+    def sort_key(c):
+        is_shift_lead = c.get("role") == "Shift Lead"
+        hours = hours_allocated.get(UUID(str(c["employee_id"])), 0)
+        # Shift Leads get priority (0) for OPEN/CLOSE, others get (1)
+        lead_priority = 0 if (requires_shift_lead and is_shift_lead) else 1
+        return (lead_priority, hours)
+
+    sorted_candidates = sorted(candidates, key=sort_key)
 
     # Create timezone-aware datetimes for shift
     shift_start = datetime(
@@ -668,13 +730,32 @@ def _allocate_shift_type(
                 is_violation = True
                 violation_reason = weekly_violation.description
 
+        # Rule D: Shift Lead check for OPEN/CLOSE shifts
+        is_role_violation = False
+        if requires_shift_lead and candidate.get("role") != "Shift Lead":
+            is_role_violation = True
+            role_msg = f"No Shift Lead for {shift_type} - assigned {candidate.get('role', 'Barista')}"
+            if violation_reason:
+                violation_reason = f"{violation_reason}; {role_msg}"
+            else:
+                violation_reason = role_msg
+            logger.warning(
+                "ROLE VIOLATION for %s on %s: %s",
+                shift_type,
+                shift_date,
+                role_msg,
+            )
+
+        # Calculate break schedule based on BC Labor Laws
+        break_schedule = _get_break_schedule(shift_duration)
+
         # Create the shift
         shift_data = ShiftCreate(
             employee_id=employee_id,
             start_time=shift_start,
             end_time=shift_end,
             status=ShiftStatus.DRAFT,
-            is_clopen_violation=is_violation,
+            is_clopen_violation=is_violation or is_role_violation,
             violation_reason=violation_reason,
         )
 
@@ -693,11 +774,13 @@ def _allocate_shift_type(
                 todays_closers[employee_id] = shift_end
 
             logger.info(
-                "Assigned %s shift on %s to %s%s",
+                "Assigned %s shift on %s to %s (%s) [%s]%s",
                 shift_type,
                 shift_date,
                 candidate["full_name"],
-                " [VIOLATION]" if is_violation else "",
+                candidate.get("role", "Barista"),
+                break_schedule,
+                " [VIOLATION]" if (is_violation or is_role_violation) else "",
             )
 
     if assigned_count < required_count:

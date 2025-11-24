@@ -51,6 +51,8 @@ def get_shift_type(start_hour: int) -> str:
         return "OPEN"
     elif start_hour == SHIFT_HOURS["MID"]["start"]:
         return "MID"
+    elif start_hour == SHIFT_HOURS.get("COVER", {}).get("start"):
+        return "COVER"
     elif start_hour == SHIFT_HOURS["CLOSE"]["start"]:
         return "CLOSE"
     return "UNKNOWN"
@@ -89,9 +91,10 @@ def main() -> int:
     print(f"Schedule Period: {start_date.strftime('%A, %B %d')} to {end_date.strftime('%A, %B %d, %Y')}")
     print()
 
-    print("Shift Configuration:")
+    print("Shift Configuration (4-Shift System for Peak Coverage):")
     print(f"  OPEN:  {SHIFT_HOURS['OPEN']['start']:02d}:00 - {SHIFT_HOURS['OPEN']['end']:02d}:00 (6 AM - 2 PM)")
     print(f"  MID:   {SHIFT_HOURS['MID']['start']:02d}:00 - {SHIFT_HOURS['MID']['end']:02d}:00 (10 AM - 6 PM)")
+    print(f"  COVER: {SHIFT_HOURS['COVER']['start']:02d}:00 - {SHIFT_HOURS['COVER']['end']:02d}:00 (11 AM - 7 PM)")
     print(f"  CLOSE: {SHIFT_HOURS['CLOSE']['start']:02d}:00 - {SHIFT_HOURS['CLOSE']['end']:02d}:00 (2 PM - 10 PM)")
     print()
 
@@ -139,9 +142,9 @@ def main() -> int:
             day_name = DAY_NAMES[current_date.weekday()]
             day_shifts = shifts_by_day.get(current_date, [])
 
-            # Sort shifts by type: OPEN, MID, CLOSE
-            shift_order = {"OPEN": 0, "MID": 1, "CLOSE": 2, "UNKNOWN": 3}
-            day_shifts.sort(key=lambda s: shift_order.get(get_shift_type(s.start_time.hour), 3))
+            # Sort shifts by type: OPEN, MID, COVER, CLOSE
+            shift_order = {"OPEN": 0, "MID": 1, "COVER": 2, "CLOSE": 3, "UNKNOWN": 4}
+            day_shifts.sort(key=lambda s: shift_order.get(get_shift_type(s.start_time.hour), 4))
 
             if not day_shifts:
                 print(f"{day_name:<12} {'---':<8} {'No shifts':<20} {'':<30}")
@@ -170,7 +173,7 @@ def main() -> int:
         print("=" * 72)
 
         # Count by shift type
-        shift_counts = {"OPEN": 0, "MID": 0, "CLOSE": 0}
+        shift_counts = {"OPEN": 0, "MID": 0, "COVER": 0, "CLOSE": 0}
         for shift in shifts:
             shift_type = get_shift_type(shift.start_time.hour)
             if shift_type in shift_counts:
@@ -181,9 +184,10 @@ def main() -> int:
         print()
         print(f"  OPEN shifts:  {shift_counts['OPEN']}")
         print(f"  MID shifts:   {shift_counts['MID']}")
+        print(f"  COVER shifts: {shift_counts['COVER']}")
         print(f"  CLOSE shifts: {shift_counts['CLOSE']}")
         print()
-        print(f"  Clopen violations: {total_violations}")
+        print(f"  Violations (clopen/role): {total_violations}")
         print()
 
         # Verdict

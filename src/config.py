@@ -109,16 +109,22 @@ class Settings(BaseSettings):
 # Singleton instance for application-wide configuration
 settings = Settings()
 
-# Shift hour definitions for the 3-shift system
+# Shift hour definitions for the 4-shift system
+# COVER shift overlaps MID to ensure 3-person coverage during peak hours
 SHIFT_HOURS = {
-    "OPEN": {"start": 6, "end": 14},   # 06:00 - 14:00
-    "MID": {"start": 10, "end": 18},   # 10:00 - 18:00
-    "CLOSE": {"start": 14, "end": 22}, # 14:00 - 22:00
+    "OPEN": {"start": 6, "end": 14},    # 06:00 - 14:00 (8h)
+    "MID": {"start": 10, "end": 18},    # 10:00 - 18:00 (8h)
+    "COVER": {"start": 11, "end": 19},  # 11:00 - 19:00 (8h) - Peak coverage
+    "CLOSE": {"start": 14, "end": 22},  # 14:00 - 22:00 (8h)
 }
 
-# Daily staffing requirements
+# Daily staffing requirements (ensures 3-person overlap during peak 14:00-18:00)
 DAILY_REQUIREMENTS = {
     "OPEN": 1,
     "MID": 1,
+    "COVER": 1,
     "CLOSE": 1,
 }
+
+# Shifts that require a Shift Lead (for role enforcement)
+SHIFT_LEAD_REQUIRED = ["OPEN", "CLOSE"]

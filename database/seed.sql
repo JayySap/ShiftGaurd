@@ -1,24 +1,76 @@
--- database/seed.sql
--- 1. Insert 4 Employees (using real emails for testing)
-INSERT INTO employees (full_name, email, role, max_weekly_hours) VALUES
-('Sarah Barista', 'saprajayant@gmail.com', 'Barista', 40),         -- Flexible (True/True)
-('John Closer', 'saprajayant03@gmail.com', 'Shift Lead', 44),      -- Close-Only
-('Mike Opener', 'jayantsapra03@gmail.com', 'Barista', 20),         -- Open-Only
-('Alex Mid', 'jsapra007@gmail.com', 'Barista', 32);                -- Mid-Only (False/False)
+-- CLEANUP
+TRUNCATE TABLE shift_feedback CASCADE;
+TRUNCATE TABLE shifts CASCADE;
+TRUNCATE TABLE standard_availability CASCADE;
+TRUNCATE TABLE employees CASCADE;
 
--- 2. Insert Availability for Next Week (assuming Monday start)
--- Sarah can work all shifts (Flexible: True/True)
-INSERT INTO availability (employee_id, shift_date, can_open, can_close)
-SELECT id, CURRENT_DATE + INTERVAL '1 day', TRUE, TRUE FROM employees WHERE email = 'saprajayant@gmail.com';
+-- 1. INSERT 10 EMPLOYEES (Mix of Shift Leads & Baristas)
+INSERT INTO employees (id, full_name, email, role, max_weekly_hours) VALUES
+-- THE LEADERSHIP (Need one of these present at all times)
+('11111111-1111-1111-1111-111111111111', 'Mike Manager', 'saprajayant@gmail.com', 'Shift Lead', 40),
+('22222222-2222-2222-2222-222222222222', 'Sarah Supervisor', 'saprajayant03@gmail.com', 'Shift Lead', 40),
+('33333333-3333-3333-3333-333333333333', 'Liam Lead', 'jayantsapra03@gmail.com', 'Shift Lead', 32),
 
--- John can ONLY Close (Close-Only: False/True)
-INSERT INTO availability (employee_id, shift_date, can_open, can_close)
-SELECT id, CURRENT_DATE + INTERVAL '1 day', FALSE, TRUE FROM employees WHERE email = 'saprajayant03@gmail.com';
+-- THE FULL TIMERS (Open/Close Flexibility)
+('44444444-4444-4444-4444-444444444444', 'Emma Earner', 'jsapra007@gmail.com', 'Barista', 40),
+('55555555-5555-5555-5555-555555555555', 'John Job', 'jayant.sapra@sait.ca', 'Barista', 40),
+('66666666-6666-6666-6666-666666666666', 'Olivia Open', 'olivia@test.com', 'Barista', 35),
 
--- Mike can ONLY Open (Open-Only: True/False)
-INSERT INTO availability (employee_id, shift_date, can_open, can_close)
-SELECT id, CURRENT_DATE + INTERVAL '1 day', TRUE, FALSE FROM employees WHERE email = 'jayantsapra03@gmail.com';
+-- THE PART TIMERS / STUDENTS (Restricted Availability)
+('77777777-7777-7777-7777-777777777777', 'Alex Afternoon', 'alex@test.com', 'Barista', 20),
+('88888888-8888-8888-8888-888888888888', 'Noah Night', 'noah@test.com', 'Barista', 20),
+('99999999-9999-9999-9999-999999999999', 'Lucas Late', 'lucas@test.com', 'Barista', 15),
+('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Sophia Student', 'sophia@test.com', 'Barista', 12);
 
--- Alex can ONLY work Mid shifts (Mid-Only: False/False)
-INSERT INTO availability (employee_id, shift_date, can_open, can_close)
-SELECT id, CURRENT_DATE + INTERVAL '1 day', FALSE, FALSE FROM employees WHERE email = 'jsapra007@gmail.com';
+-- 2. INSERT STANDARD AVAILABILITY (Recurring Rules)
+
+-- MIKE (Lead): Opens Mon-Fri
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close) VALUES
+('11111111-1111-1111-1111-111111111111', 1, TRUE, FALSE), -- Mon
+('11111111-1111-1111-1111-111111111111', 2, TRUE, FALSE), -- Tue
+('11111111-1111-1111-1111-111111111111', 3, TRUE, FALSE), -- Wed
+('11111111-1111-1111-1111-111111111111', 4, TRUE, FALSE), -- Thu
+('11111111-1111-1111-1111-111111111111', 5, TRUE, FALSE); -- Fri
+
+-- SARAH (Lead): Closes Mon-Fri
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close) VALUES
+('22222222-2222-2222-2222-222222222222', 1, FALSE, TRUE),
+('22222222-2222-2222-2222-222222222222', 2, FALSE, TRUE),
+('22222222-2222-2222-2222-222222222222', 3, FALSE, TRUE),
+('22222222-2222-2222-2222-222222222222', 4, FALSE, TRUE),
+('22222222-2222-2222-2222-222222222222', 5, FALSE, TRUE);
+
+-- LIAM (Lead): Weekends All Day + Wed Mid
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close) VALUES
+('33333333-3333-3333-3333-333333333333', 6, TRUE, TRUE), -- Sat
+('33333333-3333-3333-3333-333333333333', 0, TRUE, TRUE), -- Sun
+('33333333-3333-3333-3333-333333333333', 3, TRUE, TRUE); -- Wed
+
+-- EMMA & JOHN (Full Flex): Available Every Day
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close)
+SELECT '44444444-4444-4444-4444-444444444444', generate_series(0,6), TRUE, TRUE; -- Emma
+
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close)
+SELECT '55555555-5555-5555-5555-555555555555', generate_series(0,6), TRUE, TRUE; -- John
+
+-- OLIVIA: Mornings Only (Mon-Sat)
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close)
+SELECT '66666666-6666-6666-6666-666666666666', generate_series(1,6), TRUE, FALSE;
+
+-- ALEX: Mids Only (Mon-Fri) - (False/False implies Mid)
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close)
+SELECT '77777777-7777-7777-7777-777777777777', generate_series(1,5), FALSE, FALSE;
+
+-- NOAH: Nights Only (Thu-Sun)
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close) VALUES
+('88888888-8888-8888-8888-888888888888', 4, FALSE, TRUE),
+('88888888-8888-8888-8888-888888888888', 5, FALSE, TRUE),
+('88888888-8888-8888-8888-888888888888', 6, FALSE, TRUE),
+('88888888-8888-8888-8888-888888888888', 0, FALSE, TRUE);
+
+-- SOPHIA & LUCAS: Weekends Only
+INSERT INTO standard_availability (employee_id, day_of_week, can_open, can_close) VALUES
+('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 6, TRUE, TRUE), -- Sophia Sat
+('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 0, TRUE, TRUE), -- Sophia Sun
+('99999999-9999-9999-9999-999999999999', 6, FALSE, TRUE), -- Lucas Sat
+('99999999-9999-9999-9999-999999999999', 0, FALSE, TRUE); -- Lucas Sun

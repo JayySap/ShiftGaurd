@@ -49,21 +49,36 @@ st.markdown("""
 st.sidebar.title("ShiftGuard Admin")
 st.sidebar.markdown("---")
 
-# API Configuration
-st.sidebar.subheader("API Configuration")
-api_url = st.sidebar.text_input(
-    "API URL",
-    value="https://shiftguard-api.vercel.app",
-    help="Base URL of the ShiftGuard API"
-)
+# API Configuration - read from secrets with fallback to sidebar inputs
+# Try to get values from st.secrets first (for Streamlit Cloud deployment)
+try:
+    default_api_url = st.secrets["api"]["url"]
+    default_cron_secret = st.secrets["api"]["cron_secret"]
+    secrets_configured = True
+except (KeyError, FileNotFoundError):
+    default_api_url = "https://shiftguard-api.vercel.app"
+    default_cron_secret = ""
+    secrets_configured = False
 
-cron_secret = st.sidebar.text_input(
-    "Cron Secret",
-    type="password",
-    help="Secret for authenticated API calls (schedule generation)"
-)
+if secrets_configured:
+    # Use secrets directly - no need to show config UI
+    api_url = default_api_url
+    cron_secret = default_cron_secret
+else:
+    # Show manual input for local development
+    st.sidebar.subheader("API Configuration")
+    api_url = st.sidebar.text_input(
+        "API URL",
+        value=default_api_url,
+        help="Base URL of the ShiftGuard API"
+    )
+    cron_secret = st.sidebar.text_input(
+        "Cron Secret",
+        type="password",
+        help="Secret for authenticated API calls (schedule generation)"
+    )
+    st.sidebar.markdown("---")
 
-st.sidebar.markdown("---")
 st.sidebar.markdown("**Status:**")
 
 
