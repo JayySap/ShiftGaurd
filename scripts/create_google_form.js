@@ -148,7 +148,7 @@ function setupWebhookTrigger() {
   // ============================================
   // CONFIGURATION - UPDATE THIS!
   // ============================================
-  var WEBHOOK_URL = "https://shiftguard.vercel.app/api/v1/availability/webhook";
+  var WEBHOOK_URL = "https://shiftguard-api.vercel.app/api/v1/availability/webhook";
 
   // Get the active form (run this from the form's script editor)
   var form = FormApp.getActiveForm();
