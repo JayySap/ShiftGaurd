@@ -27,13 +27,17 @@ def proxy_all(path):
     try:
         real_app = get_real_app()
 
+        # Build the full path with query string
+        full_path = f"/{path}" if path else "/"
+        if request.query_string:
+            full_path = f"{full_path}?{request.query_string.decode('utf-8')}"
+
         with real_app.test_request_context(
-            path=f"/{path}" if path else "/",
+            path=full_path,
             method=request.method,
             headers=dict(request.headers),
             data=request.get_data(),
             content_type=request.content_type,
-            query_string=request.query_string,
         ):
             # Dispatch to the real app
             rv = real_app.full_dispatch_request()
